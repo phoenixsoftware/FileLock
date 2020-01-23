@@ -41,7 +41,6 @@ static void LockTest(
             dwFileOffsetHigh,
             nNumberOfBytesToLockLow,
             nNumberOfBytesToLockHigh))
-
             ReportError("UnlockFile fails");
     }
 
