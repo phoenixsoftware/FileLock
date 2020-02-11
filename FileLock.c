@@ -1,96 +1,71 @@
-#include <windows.h>
-#include <wtypes.h>
+/*
+ ============================================================================
+ Name        : FileLock.c
+ Author      : Eric Chevalier
+ Version     :
+ Copyright   : Copyright 2020 Phoenix Software International
+ Description : Hello World in C, Ansi-style
+ ============================================================================
+ */
+
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <time.h>
+#include <unistd.h>
+
+#define TRUE	1
+#define	FALSE	0
 
 
 static void ReportError(char* tag)
 {
-    char errorText[512];
-
-    DWORD lastError = GetLastError();
-    FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, lastError,
-        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        errorText, sizeof(errorText) / sizeof(errorText[0]), NULL);
-
-    printf("%s. GetLastError %d: %s.\n", tag, lastError, errorText);
+    int lastError = errno;
+    printf("%s. errno %d: %s.\n", tag, lastError, strerror(lastError));
 }
 
 
-static void LockTest(
-    HANDLE hFile,
-    DWORD  dwFileOffsetLow,
-    DWORD  dwFileOffsetHigh,
-    DWORD  nNumberOfBytesToLockLow,
-    DWORD  nNumberOfBytesToLockHigh,
-    char* tag
-    )
+static void AdvancedLockTest(int fd, struct stat *fileInfo, int lock, char* tag)
 {
-    printf("%s\n", tag);
-
-    if (!LockFile(hFile,
-                dwFileOffsetLow,
-                dwFileOffsetHigh,
-                nNumberOfBytesToLockLow,
-                nNumberOfBytesToLockHigh))
-        ReportError("LockFile fails");
-
-    else {
-        if (!UnlockFile(hFile,
-            dwFileOffsetLow,
-            dwFileOffsetHigh,
-            nNumberOfBytesToLockLow,
-            nNumberOfBytesToLockHigh))
-            ReportError("UnlockFile fails");
-    }
-
-    printf("LockTest finished.\n\n");
-}
-
-
-static void BasicLockTest(HANDLE hFile, BY_HANDLE_FILE_INFORMATION* fileInfo)
-{
-    LockTest(hFile, 0, 0, fileInfo->nFileSizeLow, fileInfo->nFileSizeHigh, "Locking entire file.");
-    LockTest(hFile, 0, 0, 1, 0, "Locking first byte.");
-    LockTest(hFile, fileInfo->nFileSizeLow - 1, 0, 1, 0, "Locking last byte.");
-    LockTest(hFile, 2147481429, 0, 1, 0, "Locking weird offset issued by CodeBase.");
-}
-
-
-static void AdvancedLockTest(HANDLE hFile, BY_HANDLE_FILE_INFORMATION* fileInfo, BOOL lock, char* tag)
-{
-    DWORD bytesRead, bytesToRead;
-    BYTE Buffer[203];
+	size_t bytesRead, bytesToRead;
+    unsigned char Buffer[203];
     time_t startTime, endTime, duration;
     struct tm durStruct;
-
-    unsigned __int64 fileSize = 0;
-    if (fileInfo->nFileSizeHigh > 0)
-        fileSize = ((unsigned __int64) fileInfo->nFileSizeHigh) * 0x100000000;
-    fileSize += (unsigned) fileInfo->nFileSizeLow;
+    struct flock lockParms;
+    off_t fileSize = fileInfo->st_size;
+    int count = 0;
 
     startTime = time(NULL);
 
     while (fileSize > 0) {
+    	count += 1;
 
         if (lock) {
-            if (!LockFile(hFile, 2147481429, 0, 1, 0)) {
+        	lockParms.l_type = F_RDLCK;
+        	lockParms.l_whence = SEEK_SET;
+        	lockParms.l_start = 2147481429;
+        	lockParms.l_len = 1;
+            if (-1 == fcntl(fd, F_GETLK, &lockParms)) {
                 ReportError("LockFile fails");
                 break;
             }
         }
 
         bytesToRead = fileSize > sizeof Buffer ? sizeof Buffer : fileSize;
-        BOOL readStatus = ReadFile(hFile, Buffer, bytesToRead, &bytesRead, NULL);
+        bytesRead = read(fd, Buffer, bytesToRead);
 
         if (lock) {
-            if (!UnlockFile(hFile, 2147481429, 0, 1, 0)) {
+            if (-1 == fcntl(fd, F_SETLK, &lockParms)) {
                 ReportError("UnlockFile fails");
                 break;
             }
         }
 
-        if (!readStatus) {
+        if (-1 == bytesRead) {
             ReportError("ReadFile fails");
             break;
         }
@@ -100,44 +75,38 @@ static void AdvancedLockTest(HANDLE hFile, BY_HANDLE_FILE_INFORMATION* fileInfo,
 
     endTime = time(NULL);
     duration = endTime - startTime;
-    gmtime_s(&durStruct , &duration);
-    strftime(Buffer, sizeof Buffer, "Duration: %H:%M:%S", &durStruct);
-    printf("%-32s%s\n", tag, Buffer);
+    gmtime_r(&duration, &durStruct);
+    strftime((char*) Buffer, sizeof Buffer, "Duration: %H:%M:%S", &durStruct);
+    printf("%-32s%s  %6d loop iterations\n", tag, Buffer, count);
 }
 
 
-void main(int argc, char *argv[])
-{
-    HANDLE hFile;
+int main(int argc, char **argv) {
+    int fd;
 
     if (argc < 2) {
         printf("Command line is missing an input file name!\n");
-        return;
+        return EXIT_FAILURE;
     }
 
-    hFile = CreateFile(argv[1],
-        GENERIC_READ,
-        0,                          // do not share
-        NULL,                       // no security
-        OPEN_EXISTING,              // existing file only
-        FILE_ATTRIBUTE_NORMAL,      // normal file
-        NULL);                      // no attr. template
+    fd = open(argv[1], O_RDONLY);
 
-    if (hFile == INVALID_HANDLE_VALUE)
+    if (-1 == fd)
         ReportError("Cannot open input file");
 
     else {
-        BY_HANDLE_FILE_INFORMATION fileInfo;
+        struct stat fileInfo;
 
-        if (!GetFileInformationByHandle(hFile, &fileInfo))
+        if (-1 == fstat(fd, &fileInfo))
             ReportError("GetFileInformationByHandle fails");
 
         else {
-            AdvancedLockTest(hFile, &fileInfo, TRUE,  "Testing with locking.");
-            SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
-            AdvancedLockTest(hFile, &fileInfo, FALSE, "Testing without locking.");
+            AdvancedLockTest(fd, &fileInfo, TRUE,  "Testing with locking.");
+            lseek(fd, 0, SEEK_SET);
+            AdvancedLockTest(fd, &fileInfo, FALSE, "Testing without locking.");
         }
 
-        CloseHandle(hFile);
+        close(fd);
     }
+	return EXIT_SUCCESS;
 }
